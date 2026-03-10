@@ -67,14 +67,7 @@ askyn() {
 gen()  { openssl rand -hex 32; }
 genp() { openssl rand -base64 16 | tr -d '/+=' | head -c 20; }
 
-# sed -i portable (GNU/Linux vs BSD/macOS)
-sedi() {
-  if sed --version 2>/dev/null | grep -q GNU; then
-    sed -i "$@"
-  else
-    sed -i '' "$@"
-  fi
-}
+sedi() { sed -i "$@"; }
 
 # ─── Docker installation ─────────────────────────────────────────────────────
 
@@ -212,37 +205,6 @@ install_docker_linux() {
   ok "Docker installé avec succès"
 }
 
-install_docker_macos() {
-  warn "Docker n'est pas installé"
-  echo
-
-  if command -v brew &>/dev/null; then
-    askyn INSTALL_BREW "Installer Docker Desktop via Homebrew ?" "y"
-    if [ "$INSTALL_BREW" = "y" ]; then
-      step "Installation de Docker Desktop via Homebrew"
-      brew install --cask docker
-      echo
-      ok "Docker Desktop installé"
-      warn "Ouvrez Docker Desktop depuis les Applications pour le démarrer"
-      warn "Une fois Docker Desktop lancé, relancez : ${BOLD}./setup.sh${NC}"
-      exit 0
-    fi
-  else
-    echo -e "  ${BOLD}Option 1 — Homebrew${NC} ${DIM}(recommandé)${NC}"
-    echo -e "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-    echo -e "    brew install --cask docker"
-    echo
-    echo -e "  ${BOLD}Option 2 — Téléchargement direct${NC}"
-    echo -e "    ${CYAN}https://www.docker.com/products/docker-desktop/${NC}"
-    echo
-    echo -e "  ${BOLD}Option 3 — OrbStack${NC} ${DIM}(plus léger que Docker Desktop)${NC}"
-    echo -e "    ${CYAN}https://orbstack.dev${NC}"
-  fi
-
-  echo
-  fatal "Installez et démarrez Docker, puis relancez setup.sh"
-}
-
 check_and_install_docker() {
   local docker_found=n
   local daemon_running=n
@@ -257,42 +219,29 @@ check_and_install_docker() {
     return 0
   fi
 
-  # ── Cas 2 : Docker absent → proposer l'installation ─────────────────────────
+  # ── Cas 2 : Docker absent → installation ────────────────────────────────────
   if [ "$docker_found" = "n" ]; then
-    if [ "$OS_TYPE" = "Linux" ]; then
-      install_docker_linux      # affiche distro + méthode + demande confirmation
-
-    elif [ "$OS_TYPE" = "Darwin" ]; then
-      install_docker_macos      # affiche options + quitte
-
-    else
-      fatal "OS '$OS_TYPE' non supporté. Installez Docker manuellement : https://docs.docker.com/engine/install/"
-    fi
+    install_docker_linux    # affiche distro + méthode + demande confirmation
 
   # ── Cas 3 : Docker installé mais daemon inactif ──────────────────────────────
   else
     warn "Docker est installé mais le daemon est arrêté"
-    if [ "$OS_TYPE" = "Linux" ]; then
-      if command -v systemctl &>/dev/null; then
-        info "Démarrage du service Docker…"
-        sudo systemctl start docker
-        sleep 2
-        if docker info &>/dev/null 2>&1; then
-          ok "Docker daemon démarré"
-        else
-          fatal "Impossible de démarrer Docker. Diagnostic : sudo systemctl status docker"
-        fi
-      elif command -v service &>/dev/null; then
-        sudo service docker start
-        sleep 2
-        docker info &>/dev/null 2>&1 && ok "Docker daemon démarré" \
-          || fatal "Impossible de démarrer Docker. Lancez-le manuellement."
+    if command -v systemctl &>/dev/null; then
+      info "Démarrage du service Docker…"
+      sudo systemctl start docker
+      sleep 2
+      if docker info &>/dev/null 2>&1; then
+        ok "Docker daemon démarré"
       else
-        fatal "Impossible de démarrer Docker automatiquement. Lancez-le manuellement."
+        fatal "Impossible de démarrer Docker. Diagnostic : sudo systemctl status docker"
       fi
+    elif command -v service &>/dev/null; then
+      sudo service docker start
+      sleep 2
+      docker info &>/dev/null 2>&1 && ok "Docker daemon démarré" \
+        || fatal "Impossible de démarrer Docker. Lancez-le manuellement."
     else
-      warn "Docker Desktop n'est pas démarré"
-      fatal "Ouvrez Docker Desktop depuis les Applications, puis relancez setup.sh"
+      fatal "Impossible de démarrer Docker automatiquement. Lancez-le manuellement."
     fi
   fi
 }
@@ -306,42 +255,38 @@ check_docker_compose() {
 
   if command -v docker-compose &>/dev/null; then
     DC="docker-compose"
-    ok "docker-compose v1 $(docker-compose --version | grep -oP '\d+\.\d+\.\d+' | head -1)"
+    ok "docker-compose v1 $(docker-compose --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     return 0
   fi
 
-  # Compose manquant → tenter l'installation sur Linux
-  if [ "$OS_TYPE" = "Linux" ]; then
-    warn "Docker Compose plugin absent — installation…"
-    # Essayer via apt/dnf d'abord, sinon binaire direct
-    if command -v apt-get &>/dev/null; then
-      sudo apt-get install -y docker-compose-plugin 2>/dev/null \
-        || sudo apt-get install -y docker-compose 2>/dev/null \
-        || true
-    elif command -v dnf &>/dev/null; then
-      sudo dnf install -y docker-compose-plugin 2>/dev/null || true
-    fi
-
-    # Vérifier à nouveau
-    if docker compose version &>/dev/null 2>&1; then
-      DC="docker compose"
-      ok "docker compose installé"
-      return 0
-    fi
-
-    # Fallback : installer le binaire standalone
-    COMPOSE_VERSION="2.27.0"
-    COMPOSE_ARCH="$(uname -m)"
-    [ "$COMPOSE_ARCH" = "aarch64" ] && COMPOSE_ARCH="aarch64" || COMPOSE_ARCH="x86_64"
-    COMPOSE_URL="https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
-    info "Installation de docker compose ${COMPOSE_VERSION}…"
-    sudo curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-    DC="docker-compose"
-    ok "docker-compose ${COMPOSE_VERSION} installé"
-  else
-    fatal "Docker Compose introuvable. Installez Docker Desktop (inclut Compose)."
+  # Compose manquant → installation automatique
+  warn "Docker Compose plugin absent — installation…"
+  if command -v apt-get &>/dev/null; then
+    sudo apt-get install -y docker-compose-plugin 2>/dev/null \
+      || sudo apt-get install -y docker-compose 2>/dev/null \
+      || true
+  elif command -v dnf &>/dev/null; then
+    sudo dnf install -y docker-compose-plugin 2>/dev/null || true
+  elif command -v pacman &>/dev/null; then
+    sudo pacman -Sy --noconfirm docker-compose 2>/dev/null || true
   fi
+
+  if docker compose version &>/dev/null 2>&1; then
+    DC="docker compose"
+    ok "docker compose installé"
+    return 0
+  fi
+
+  # Fallback : binaire standalone depuis GitHub
+  COMPOSE_VERSION="2.27.0"
+  COMPOSE_ARCH="$(uname -m)"
+  [ "$COMPOSE_ARCH" = "aarch64" ] && COMPOSE_ARCH="aarch64" || COMPOSE_ARCH="x86_64"
+  COMPOSE_URL="https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
+  info "Installation de docker compose ${COMPOSE_VERSION}…"
+  sudo curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose
+  DC="docker-compose"
+  ok "docker-compose ${COMPOSE_VERSION} installé"
 }
 
 # ─── Banner ───────────────────────────────────────────────────────────────────
@@ -353,28 +298,25 @@ banner
 step "Vérification des prérequis"
 
 OS_TYPE="$(uname -s)"
-ok "OS : ${OS_TYPE} ($(uname -m))"
+[ "$OS_TYPE" != "Linux" ] && fatal "setup.sh est prévu pour Linux uniquement (détecté : $OS_TYPE)"
+ok "Linux ($(uname -m))"
 
-# openssl et curl sont toujours requis
+# curl et openssl sont requis — installation automatique si absents
 for cmd in curl openssl; do
   if command -v "$cmd" &>/dev/null; then
     ok "$cmd"
   else
-    if [ "$OS_TYPE" = "Linux" ]; then
-      warn "$cmd absent — installation…"
-      if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y "$cmd"
-      elif command -v dnf &>/dev/null; then
-        sudo dnf install -y "$cmd"
-      elif command -v pacman &>/dev/null; then
-        sudo pacman -Sy --noconfirm "$cmd"
-      else
-        fatal "$cmd est requis mais ne peut pas être installé automatiquement"
-      fi
-      ok "$cmd installé"
+    warn "$cmd absent — installation…"
+    if command -v apt-get &>/dev/null; then
+      sudo apt-get install -y "$cmd"
+    elif command -v dnf &>/dev/null; then
+      sudo dnf install -y "$cmd"
+    elif command -v pacman &>/dev/null; then
+      sudo pacman -Sy --noconfirm "$cmd"
     else
-      fatal "$cmd est requis. Installez-le avec Homebrew : brew install $cmd"
+      fatal "$cmd est requis mais ne peut pas être installé automatiquement"
     fi
+    ok "$cmd installé"
   fi
 done
 
@@ -390,8 +332,17 @@ step "Configuration"
 
 REUSE_ENV="n"
 if [ -f ".env" ]; then
-  warn ".env existant détecté"
-  askyn REUSE_ENV "Réutiliser le .env existant ?" "y"
+  if grep -q "^NETMAP_PORT" .env 2>/dev/null; then
+    # .env compatible avec la version actuelle
+    warn ".env existant détecté"
+    askyn REUSE_ENV "Réutiliser le .env existant ?" "y"
+  else
+    # .env d'un ancien format (ex : avec DOMAIN/ACME_EMAIL pour Traefik)
+    warn ".env détecté mais format obsolète — il sera sauvegardé et régénéré"
+    cp .env ".env.bak.$(date +%Y%m%d_%H%M%S)"
+    ok "Ancienne config sauvegardée (.env.bak.*)"
+    REUSE_ENV="n"
+  fi
 fi
 
 if [ "$REUSE_ENV" = "y" ]; then
@@ -509,35 +460,64 @@ step "Démarrage des services"
 $DC up -d server frontend
 ok "Conteneurs démarrés"
 
-echo -ne "  Attente du serveur"
+# Attendre que le serveur soit healthy via docker inspect
+# (le port 3000 n'est pas exposé sur l'hôte — seul nginx:8080 l'est)
+echo -ne "  Attente du serveur (health check)"
+SERVER_HEALTHY=n
 for i in $(seq 1 40); do
-  if curl -sf "http://localhost:3000/api/health" &>/dev/null 2>&1; then
-    echo -e " ${GREEN}✓${NC}"; break
+  # Récupère le nom/id du conteneur server
+  SRV=$($DC ps -q server 2>/dev/null | head -1)
+  if [ -n "$SRV" ]; then
+    STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$SRV" 2>/dev/null || echo "")
+    if [ "$STATUS" = "healthy" ]; then
+      echo -e " ${GREEN}✓${NC}"
+      SERVER_HEALTHY=y
+      break
+    fi
   fi
   echo -n "."; sleep 2
   if [ "$i" -eq 40 ]; then
     echo -e " ${YELLOW}timeout${NC}"
-    warn "Le serveur tarde à répondre. Vérifiez : $DC logs server"
+    warn "Le serveur ne répond pas. Diagnostic : $DC logs server"
   fi
 done
+
+# Attendre que nginx (frontend) soit également up sur le port exposé
+if [ "$SERVER_HEALTHY" = "y" ]; then
+  echo -ne "  Attente de l'interface (nginx:${NETMAP_PORT:-8080})"
+  for i in $(seq 1 20); do
+    if curl -sf "http://localhost:${NETMAP_PORT:-8080}/api/health" &>/dev/null 2>&1; then
+      echo -e " ${GREEN}✓${NC}"; break
+    fi
+    echo -n "."; sleep 2
+    if [ "$i" -eq 20 ]; then
+      echo -e " ${YELLOW}timeout${NC}"
+      warn "nginx tarde à répondre. Diagnostic : $DC logs frontend"
+    fi
+  done
+fi
 
 # ─── Step 5 : Scanner token ──────────────────────────────────────────────────
 
 step "Token scanner"
 
+# Point d'entrée API : toujours via nginx (port exposé sur l'hôte)
+API_BASE="http://localhost:${NETMAP_PORT:-8080}"
+
 if [ -n "${SCANNER_TOKEN:-}" ]; then
   ok "Token scanner déjà configuré"
 else
-  LOGIN=$(curl -sf -X POST "http://localhost:3000/api/auth/login" \
+  LOGIN=$(curl -sf -X POST "${API_BASE}/api/auth/login" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"admin\",\"password\":\"${NETMAP_ADMIN_PASS}\"}" 2>/dev/null || echo '{}')
 
   ACCESS_TOKEN=$(echo "$LOGIN" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
 
   if [ -z "$ACCESS_TOKEN" ]; then
-    warn "Authentification échouée — créez le token manuellement via l'interface admin"
+    warn "Authentification échouée — créez le token manuellement dans l'interface admin"
+    info "→ http://localhost:${NETMAP_PORT:-8080} (onglet Admin › Tokens)"
   else
-    TOKEN_RESP=$(curl -sf -X POST "http://localhost:3000/api/admin/tokens" \
+    TOKEN_RESP=$(curl -sf -X POST "${API_BASE}/api/admin/tokens" \
       -H "Authorization: Bearer ${ACCESS_TOKEN}" \
       -H 'Content-Type: application/json' \
       -d '{"name":"scanner-local","scope":"scanner"}' 2>/dev/null || echo '{}')
@@ -559,34 +539,18 @@ fi
 
 step "Scanner ARP/nmap"
 
-if [ "$OS_TYPE" = "Linux" ]; then
-  if [ -n "${SCANNER_TOKEN:-}" ]; then
-    askyn START_SCANNER "Démarrer le scanner ARP maintenant ?" "y"
-    if [ "$START_SCANNER" = "y" ]; then
-      set -a; source .env; set +a
-      $DC --profile scanner up -d scanner
-      ok "Scanner démarré (intervalle: ${SCAN_INTERVAL:-300}s, réseaux: ${SCAN_NETWORKS:-?})"
-    else
-      info "Pour démarrer plus tard : $DC --profile scanner up -d scanner"
-    fi
+if [ -n "${SCANNER_TOKEN:-}" ]; then
+  askyn START_SCANNER "Démarrer le scanner ARP maintenant ?" "y"
+  if [ "$START_SCANNER" = "y" ]; then
+    set -a; source .env; set +a
+    $DC --profile scanner up -d scanner
+    ok "Scanner démarré (intervalle: ${SCAN_INTERVAL:-300}s, réseaux: ${SCAN_NETWORKS:-?})"
   else
-    warn "Token manquant — scanner non démarré"
-    info "Créez un token scope 'scanner' dans l'interface admin, puis relancez setup.sh"
+    info "Pour démarrer plus tard : $DC --profile scanner up -d scanner"
   fi
 else
-  HOST_IP=$(ipconfig getifaddr en0 2>/dev/null \
-    || ip route get 1 2>/dev/null | awk '{print $7; exit}' \
-    || echo "<IP-DE-CE-SERVEUR>")
-
-  warn "macOS : network_mode host non supporté par Docker Desktop"
-  echo
-  echo -e "  ${BOLD}Lancer le scanner depuis un Linux sur ton réseau :${NC}"
-  echo
-  printf "  docker run --rm --net=host --cap-add=NET_RAW --cap-add=NET_ADMIN \\\n"
-  printf "    -e NETMAP_SERVER=http://%s:%s \\\n" "$HOST_IP" "${NETMAP_PORT:-8080}"
-  printf "    -e NETMAP_TOKEN=%s \\\n" "${SCANNER_TOKEN:-<token>}"
-  printf "    -e SCAN_NETWORKS=%s \\\n" "${SCAN_NETWORKS:-192.168.1.0/24}"
-  printf "    ghcr.io/netmap/scanner:latest\n"
+  warn "Token manquant — scanner non démarré"
+  info "Créez un token scope 'scanner' dans l'interface admin, puis relancez setup.sh"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
