@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useTopology }  from "../hooks/useTopology.js";
 import { useWebSocket } from "../hooks/useWebSocket.js";
 import TopologyGraph   from "../components/TopologyGraph.jsx";
@@ -41,15 +41,25 @@ export default function Dashboard({ user, onLogout }) {
     return () => clearInterval(t);
   }, []);
 
+  // Timeout : si scan_started mais aucun scan_progress en 2 min → reset
+  const scanTimeoutRef = useRef(null);
+
   const handleWsMessage = useCallback((msg) => {
     if (msg.event === "agent_updated" || msg.event === "proxmox_updated") {
       refresh();
     }
     if (msg.event === "scan_started") {
+      clearTimeout(scanTimeoutRef.current);
       setScanProgress({ done: 0, total: 0, network: msg.data.network, startTime: Date.now() });
       setScannerStatus(s => s ? { ...s, in_progress: true } : { in_progress: true });
+      // Timeout de sécurité : si aucune mise à jour en 3 minutes, on abandonne
+      scanTimeoutRef.current = setTimeout(() => {
+        setScanProgress(null);
+        setScannerStatus(s => s ? { ...s, in_progress: false } : null);
+      }, 3 * 60 * 1000);
     }
     if (msg.event === "scan_progress") {
+      clearTimeout(scanTimeoutRef.current);
       setScanProgress(p => p ? {
         ...p,
         done:      msg.data.done,
@@ -57,8 +67,14 @@ export default function Dashboard({ user, onLogout }) {
         network:   msg.data.network,
         currentIp: msg.data.current_ip,
       } : null);
+      // Renouveler le timeout après chaque update
+      scanTimeoutRef.current = setTimeout(() => {
+        setScanProgress(null);
+        setScannerStatus(s => s ? { ...s, in_progress: false } : null);
+      }, 3 * 60 * 1000);
     }
     if (msg.event === "scanner_updated") {
+      clearTimeout(scanTimeoutRef.current);
       setScanProgress(null);
       setScannerStatus({
         in_progress:  false,

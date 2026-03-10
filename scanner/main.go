@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -497,23 +498,31 @@ func scanNetwork(network string) {
 		log.Printf("[scanner] ARP sweep error: %v", err)
 		return
 	}
-	log.Printf("[scanner] Found %d hosts via ARP on %s", len(arpResults), network)
+	total := len(arpResults)
+	log.Printf("[scanner] Found %d hosts via ARP on %s", total, network)
+
+	if total == 0 {
+		// Rien à scanner — envoyer un rapport vide pour signaler la fin
+		pushReport(ScanResult{ScannedAt: time.Now().UTC(), Network: network, Hosts: []ScannedHost{}})
+		return
+	}
+
+	// Signaler au serveur le total réel trouvé par l'ARP sweep
+	pushProgress(0, total, "", network)
 
 	sem := make(chan struct{}, maxConcurrent)
 	var mu sync.Mutex
 	var hosts []ScannedHost
 	var wg sync.WaitGroup
+	var completedCount int64 // compteur atomique d'hôtes traités
 
-	for i, ar := range arpResults {
+	for _, ar := range arpResults {
 		wg.Add(1)
 		ar := ar
-		i := i
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			pushProgress(i, len(arpResults), ar.IP, network)
 
 			host := ScannedHost{
 				IP:  ar.IP,
@@ -543,6 +552,10 @@ func scanNetwork(network string) {
 			mu.Lock()
 			hosts = append(hosts, host)
 			mu.Unlock()
+
+			// Mise à jour de progression APRÈS traitement (compteur réel)
+			done := int(atomic.AddInt64(&completedCount, 1))
+			pushProgress(done, total, ar.IP, network)
 		}()
 	}
 	wg.Wait()
@@ -560,6 +573,37 @@ func scanNetwork(network string) {
 	}
 }
 
+// ─── HTTP trigger server ─────────────────────────────────────────────────
+
+func startTriggerServer() {
+	mux := http.NewServeMux()
+
+	// POST /trigger — déclenche un scan immédiat
+	mux.HandleFunc("/trigger", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		log.Printf("HTTP trigger received — launching immediate scan")
+		for _, network := range scanNetworks {
+			go scanNetwork(network)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	// GET /health
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	log.Printf("HTTP trigger server listening on :8080")
+	if err := http.ListenAndServe(":8080", mux); err != nil {
+		log.Printf("HTTP trigger server error: %v", err)
+	}
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 func main() {
@@ -567,7 +611,10 @@ func main() {
 	log.SetPrefix("[netmap-scanner] ")
 	log.Printf("Starting — networks=%v  interval=%s", scanNetworks, scanInterval)
 
-	// First scan immediately
+	// Serveur HTTP pour les triggers manuels
+	go startTriggerServer()
+
+	// Premier scan immédiat au démarrage
 	for _, network := range scanNetworks {
 		go scanNetwork(network)
 	}
