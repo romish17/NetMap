@@ -528,32 +528,65 @@ API_BASE="http://localhost:3001"   # Port direct du serveur (pas nginx)
 if [ -n "${SCANNER_TOKEN:-}" ]; then
   ok "Token scanner déjà configuré"
 elif [ "$SERVER_HEALTHY" = "y" ]; then
-  LOGIN=$(curl -sf -X POST "${API_BASE}/api/auth/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"username\":\"admin\",\"password\":\"${NETMAP_ADMIN_PASS}\"}" \
-    2>/dev/null || echo '{}')
 
-  ACCESS_TOKEN=$(echo "$LOGIN" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4 || true)
+  # ── Fallback : créer le token directement via docker exec (pas besoin du login) ──
+  SERVER_CONTAINER=$($DC ps -q server 2>/dev/null | head -1)
+  if [ -n "$SERVER_CONTAINER" ]; then
+    RAW_TOKEN=$(docker exec -e "NETMAP_ADMIN_PASS=${NETMAP_ADMIN_PASS}" "$SERVER_CONTAINER" \
+      node --input-type=module --eval "
+import { createHash, randomBytes } from 'crypto';
+import bcrypt from 'bcrypt';
+const { db } = await import('./src/db.js');
 
-  if [ -z "${ACCESS_TOKEN:-}" ]; then
-    warn "Authentification échouée — créez le token manuellement"
-    info "→ ${API_BASE} › Admin › Tokens"
-  else
-    TOKEN_RESP=$(curl -sf -X POST "${API_BASE}/api/admin/tokens" \
-      -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-      -H 'Content-Type: application/json' \
-      -d '{"name":"scanner-local","scope":"scanner"}' \
-      2>/dev/null || echo '{}')
+// Synchronise le mot de passe admin avec NETMAP_ADMIN_PASS
+const pass = process.env.NETMAP_ADMIN_PASS;
+if (pass) {
+  const h = await bcrypt.hash(pass, 12);
+  db.prepare('UPDATE users SET password = ? WHERE username = ?').run(h, 'admin');
+}
 
-    RAW_TOKEN=$(echo "$TOKEN_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || true)
+// Crée ou renouvelle le token scanner (DELETE + INSERT pour éviter les doublons)
+const raw = randomBytes(32).toString('hex');
+const hash = createHash('sha256').update(raw).digest('hex');
+db.prepare(\"DELETE FROM agent_tokens WHERE name = 'scanner-local'\").run();
+db.prepare(\"INSERT INTO agent_tokens (name, token_hash, scope) VALUES (?, ?, ?)\")
+  .run('scanner-local', hash, 'scanner');
+process.stdout.write(raw);
+" 2>/dev/null)
 
     if [ -n "${RAW_TOKEN:-}" ]; then
       sedi "s|^SCANNER_TOKEN=.*|SCANNER_TOKEN=${RAW_TOKEN}|" .env
       SCANNER_TOKEN="$RAW_TOKEN"
       ok "Token scanner créé et sauvegardé dans .env"
     else
-      warn "Création du token échouée — utilisez l'interface admin"
+      # Dernière chance : via l'API avec le mot de passe actuel
+      LOGIN=$(curl -sf -X POST "${API_BASE}/api/auth/login" \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"admin\",\"password\":\"${NETMAP_ADMIN_PASS}\"}" \
+        2>/dev/null || echo '{}')
+      ACCESS_TOKEN=$(echo "$LOGIN" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4 || true)
+      if [ -n "${ACCESS_TOKEN:-}" ]; then
+        TOKEN_RESP=$(curl -sf -X POST "${API_BASE}/api/admin/tokens" \
+          -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d '{"name":"scanner-local","scope":"scanner"}' \
+          2>/dev/null || echo '{}')
+        RAW_TOKEN=$(echo "$TOKEN_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || true)
+        if [ -n "${RAW_TOKEN:-}" ]; then
+          sedi "s|^SCANNER_TOKEN=.*|SCANNER_TOKEN=${RAW_TOKEN}|" .env
+          SCANNER_TOKEN="$RAW_TOKEN"
+          ok "Token scanner créé (via API)"
+        else
+          warn "Création du token échouée — créez-le dans l'interface admin"
+          info "→ http://netmap-frontend-1.orb.local › Admin › Tokens"
+        fi
+      else
+        warn "Authentification échouée — créez le token manuellement"
+        info "→ http://netmap-frontend-1.orb.local › Admin › Tokens"
+      fi
     fi
+  else
+    warn "Conteneur serveur introuvable"
   fi
 else
   warn "Serveur non disponible — token scanner non créé"
