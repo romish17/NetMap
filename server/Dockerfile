@@ -15,5 +15,6 @@ FROM base AS prod
 COPY --from=builder /app/node_modules ./node_modules
 COPY src ./src
 COPY package.json ./
+RUN mkdir -p /data && chown node:node /data
 USER node
 CMD ["node", "src/index.js"]
