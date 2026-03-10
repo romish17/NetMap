@@ -503,18 +503,18 @@ for i in $(seq 1 50); do
   fi
 done
 
-# Attendre que nginx soit joignable sur le port exposé
+# Attendre que le serveur soit joignable sur le port direct 3001
 if [ "$SERVER_HEALTHY" = "y" ]; then
-  echo -ne "  Attente de l'interface (port ${NETMAP_PORT})"
+  echo -ne "  Attente du serveur (port 3001)"
   for i in $(seq 1 25); do
-    if curl -sf "http://localhost:${NETMAP_PORT}/api/health" &>/dev/null 2>&1; then
+    if curl -sf "http://localhost:3001/api/health" &>/dev/null 2>&1; then
       echo -e " ${GREEN}✓${NC}"
       break
     fi
     echo -n "."; sleep 2
     if [ "$i" -eq 25 ]; then
       echo -e " ${YELLOW}timeout${NC}"
-      warn "nginx non prêt. Diagnostic : $DC logs frontend"
+      warn "Serveur non prêt. Diagnostic : $DC logs server"
     fi
   done
 fi
@@ -523,7 +523,7 @@ fi
 
 step "Token scanner"
 
-API_BASE="http://localhost:${NETMAP_PORT}"
+API_BASE="http://localhost:3001"   # Port direct du serveur (pas nginx)
 
 if [ -n "${SCANNER_TOKEN:-}" ]; then
   ok "Token scanner déjà configuré"

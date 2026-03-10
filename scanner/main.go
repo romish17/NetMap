@@ -457,7 +457,9 @@ func pushReport(result ScanResult) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+		buf := make([]byte, 512)
+		n, _ := resp.Body.Read(buf)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(buf[:n])))
 	}
 	return nil
 }
@@ -479,9 +481,15 @@ func pushProgress(done, total int, currentIP, network string) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[scanner] pushProgress: %v", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		buf := make([]byte, 256)
+		n, _ := resp.Body.Read(buf)
+		log.Printf("[scanner] pushProgress: server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(buf[:n])))
+	}
 }
 
 // ─── Full scan cycle ─────────────────────────────────────────────────────
@@ -610,6 +618,9 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("[netmap-scanner] ")
 	log.Printf("Starting — networks=%v  interval=%s", scanNetworks, scanInterval)
+	if agentToken == "changeme" {
+		log.Printf("WARNING: NETMAP_TOKEN is not set (using default 'changeme') — reports will be rejected with 401!")
+	}
 
 	// Serveur HTTP pour les triggers manuels
 	go startTriggerServer()
