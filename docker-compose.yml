@@ -20,6 +20,9 @@ services:
       - NETMAP_ADMIN_PASS=${NETMAP_ADMIN_PASS:-}
     volumes:
       - netmap-data:/data
+      # Serve the agent install script and pre-built binaries
+      - ./agent/deploy/install.sh:/app/install.sh:ro
+      - ./downloads:/app/downloads:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]

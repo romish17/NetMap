@@ -22,6 +22,9 @@ agent/netmap-agent
 scanner/netmap-scanner
 vendor/
 
+# ── Agent pre-built downloads (large binaries, build locally) ─────────────────
+downloads/netmap-agent-*
+
 # ── Docker ────────────────────────────────────────────────────────────────────
 docker-compose.override.yml
 

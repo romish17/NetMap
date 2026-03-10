@@ -135,6 +135,21 @@ curl -fsSL http://<netmap-host>:8080/install.sh | \
 
 The script auto-detects the architecture (amd64 / arm64 / armv7), downloads the binary, and installs a systemd service.
 
+### Build agent binaries for download
+
+The install script fetches the binary from `http://<netmap-host>:8080/downloads/netmap-agent-linux-<arch>`. Place the binaries in the `downloads/` directory before starting NetMap:
+
+```bash
+# Build for all supported architectures
+cd agent
+
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64  go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-amd64  .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64  go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm64  .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm    go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm    .
+```
+
+If no binaries are present, the install script will fail. You can still deploy the agent manually by copying the binary and the `agent/deploy/systemd.service` template.
+
 ### Create an agent token manually
 
 ```bash

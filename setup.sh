@@ -76,30 +76,313 @@ sedi() {
   fi
 }
 
+# ─── Docker installation ─────────────────────────────────────────────────────
+
+# Lit /etc/os-release et expose :
+#   DISTRO_ID       (ex: ubuntu, debian, fedora, arch, alpine…)
+#   DISTRO_NAME     (ex: "Ubuntu 22.04.3 LTS")
+#   DISTRO_ID_LIKE  (ex: "debian" pour Linux Mint, "rhel fedora" pour CentOS)
+detect_distro() {
+  DISTRO_ID="unknown"; DISTRO_NAME="Linux"; DISTRO_ID_LIKE=""; DISTRO_VERSION=""
+  if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    DISTRO_ID="${ID:-unknown}"
+    DISTRO_NAME="${PRETTY_NAME:-${NAME:-Linux}}"
+    DISTRO_VERSION="${VERSION_ID:-}"
+    DISTRO_ID_LIKE="${ID_LIKE:-}"
+  fi
+}
+
+# Lance l'installation Docker adaptée à la distribution détectée.
+# Affiche la distro + la méthode choisie, demande confirmation.
+install_docker_linux() {
+  step "Installation de Docker"
+  detect_distro
+
+  echo -e "  Distribution : ${BOLD}${DISTRO_NAME}${NC}"
+  echo
+
+  # ── Choisir la méthode selon l'ID de la distro ──────────────────────────────
+  local method=""
+
+  case "$DISTRO_ID" in
+
+    # ── Arch Linux et dérivés ──────────────────────────────────────────────────
+    arch|manjaro|endeavouros|garuda|cachyos)
+      method="pacman"
+      ;;
+
+    # ── Alpine Linux ───────────────────────────────────────────────────────────
+    alpine)
+      method="apk"
+      ;;
+
+    # ── Distros officiellement supportées par get.docker.com ──────────────────
+    ubuntu|debian|raspbian|linuxmint|pop|kali|elementary|neon|\
+    centos|rhel|fedora|almalinux|rocky|ol|amzn|\
+    opensuse-leap|opensuse-tumbleweed|sles)
+      method="get.docker.com"
+      ;;
+
+    # ── Distros dérivées non listées : vérifier ID_LIKE ───────────────────────
+    *)
+      for like in $DISTRO_ID_LIKE; do
+        case "$like" in
+          debian|ubuntu)              method="get.docker.com"; break ;;
+          rhel|fedora|centos)         method="get.docker.com"; break ;;
+          suse|opensuse)              method="get.docker.com"; break ;;
+          arch)                       method="pacman";          break ;;
+          alpine)                     method="apk";             break ;;
+        esac
+      done
+      ;;
+  esac
+
+  # ── Affichage + confirmation avant d'agir ───────────────────────────────────
+  if [ "$method" = "get.docker.com" ]; then
+    echo -e "  Méthode      : ${BOLD}Script officiel Docker${NC} ${DIM}(get.docker.com)${NC}"
+  elif [ "$method" = "pacman" ]; then
+    echo -e "  Méthode      : ${BOLD}pacman${NC} ${DIM}(Arch Linux)${NC}"
+  elif [ "$method" = "apk" ]; then
+    echo -e "  Méthode      : ${BOLD}apk${NC} ${DIM}(Alpine Linux)${NC}"
+  else
+    echo
+    warn "Distribution non reconnue (ID=${DISTRO_ID})"
+    echo -e "  Consultez la documentation officielle :"
+    echo -e "  ${CYAN}https://docs.docker.com/engine/install/${NC}"
+    echo
+    fatal "Installez Docker manuellement puis relancez setup.sh"
+  fi
+
+  echo
+  askyn DO_INSTALL "Lancer l'installation maintenant ?" "y"
+  [ "$DO_INSTALL" = "n" ] && fatal "Docker est requis pour continuer"
+
+  # ── Exécution ────────────────────────────────────────────────────────────────
+  case "$method" in
+
+    get.docker.com)
+      info "Téléchargement du script officiel…"
+      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+      sudo sh /tmp/get-docker.sh
+      rm -f /tmp/get-docker.sh
+      ;;
+
+    pacman)
+      sudo pacman -Sy --noconfirm docker
+      ;;
+
+    apk)
+      sudo apk add --no-cache docker docker-cli-compose
+      # Alpine utilise OpenRC plutôt que systemd
+      if command -v rc-update &>/dev/null; then
+        sudo rc-update add docker default
+        sudo service docker start
+        ok "Docker démarré via OpenRC"
+        # Groupes + user
+        if [ "${EUID:-$(id -u)}" -ne 0 ] && ! id -nG "$USER" | grep -qw docker; then
+          sudo addgroup "$USER" docker 2>/dev/null || sudo usermod -aG docker "$USER" 2>/dev/null || true
+          warn "Utilisateur '$USER' ajouté au groupe 'docker' (reconnectez-vous)"
+          [ "$DC" = "docker compose" ] && DC="sudo docker compose" || DC="sudo docker-compose"
+        fi
+        ok "Docker installé avec succès"
+        return 0
+      fi
+      ;;
+  esac
+
+  # ── systemd : activer + démarrer ────────────────────────────────────────────
+  if command -v systemctl &>/dev/null; then
+    sudo systemctl enable --now docker
+    ok "Service Docker activé et démarré"
+  fi
+
+  # ── Groupe docker pour l'utilisateur courant ────────────────────────────────
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    if ! id -nG "$USER" | grep -qw docker; then
+      sudo usermod -aG docker "$USER"
+      warn "Utilisateur '$USER' ajouté au groupe 'docker'"
+      warn "Les prochaines sessions n'auront pas besoin de sudo"
+      warn "Pour cette session, on continue avec 'sudo docker'…"
+      [ "$DC" = "docker compose" ] && DC="sudo docker compose" || DC="sudo docker-compose"
+    fi
+  fi
+
+  ok "Docker installé avec succès"
+}
+
+install_docker_macos() {
+  warn "Docker n'est pas installé"
+  echo
+
+  if command -v brew &>/dev/null; then
+    askyn INSTALL_BREW "Installer Docker Desktop via Homebrew ?" "y"
+    if [ "$INSTALL_BREW" = "y" ]; then
+      step "Installation de Docker Desktop via Homebrew"
+      brew install --cask docker
+      echo
+      ok "Docker Desktop installé"
+      warn "Ouvrez Docker Desktop depuis les Applications pour le démarrer"
+      warn "Une fois Docker Desktop lancé, relancez : ${BOLD}./setup.sh${NC}"
+      exit 0
+    fi
+  else
+    echo -e "  ${BOLD}Option 1 — Homebrew${NC} ${DIM}(recommandé)${NC}"
+    echo -e "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    echo -e "    brew install --cask docker"
+    echo
+    echo -e "  ${BOLD}Option 2 — Téléchargement direct${NC}"
+    echo -e "    ${CYAN}https://www.docker.com/products/docker-desktop/${NC}"
+    echo
+    echo -e "  ${BOLD}Option 3 — OrbStack${NC} ${DIM}(plus léger que Docker Desktop)${NC}"
+    echo -e "    ${CYAN}https://orbstack.dev${NC}"
+  fi
+
+  echo
+  fatal "Installez et démarrez Docker, puis relancez setup.sh"
+}
+
+check_and_install_docker() {
+  local docker_found=n
+  local daemon_running=n
+
+  command -v docker &>/dev/null && docker_found=y
+  [ "$docker_found" = "y" ] && docker info &>/dev/null 2>&1 && daemon_running=y
+
+  # ── Cas 1 : Docker présent et daemon actif ───────────────────────────────────
+  if [ "$docker_found" = "y" ] && [ "$daemon_running" = "y" ]; then
+    DOCKER_VER=$(docker --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    ok "Docker ${DOCKER_VER} (daemon actif)"
+    return 0
+  fi
+
+  # ── Cas 2 : Docker absent → proposer l'installation ─────────────────────────
+  if [ "$docker_found" = "n" ]; then
+    if [ "$OS_TYPE" = "Linux" ]; then
+      install_docker_linux      # affiche distro + méthode + demande confirmation
+
+    elif [ "$OS_TYPE" = "Darwin" ]; then
+      install_docker_macos      # affiche options + quitte
+
+    else
+      fatal "OS '$OS_TYPE' non supporté. Installez Docker manuellement : https://docs.docker.com/engine/install/"
+    fi
+
+  # ── Cas 3 : Docker installé mais daemon inactif ──────────────────────────────
+  else
+    warn "Docker est installé mais le daemon est arrêté"
+    if [ "$OS_TYPE" = "Linux" ]; then
+      if command -v systemctl &>/dev/null; then
+        info "Démarrage du service Docker…"
+        sudo systemctl start docker
+        sleep 2
+        if docker info &>/dev/null 2>&1; then
+          ok "Docker daemon démarré"
+        else
+          fatal "Impossible de démarrer Docker. Diagnostic : sudo systemctl status docker"
+        fi
+      elif command -v service &>/dev/null; then
+        sudo service docker start
+        sleep 2
+        docker info &>/dev/null 2>&1 && ok "Docker daemon démarré" \
+          || fatal "Impossible de démarrer Docker. Lancez-le manuellement."
+      else
+        fatal "Impossible de démarrer Docker automatiquement. Lancez-le manuellement."
+      fi
+    else
+      warn "Docker Desktop n'est pas démarré"
+      fatal "Ouvrez Docker Desktop depuis les Applications, puis relancez setup.sh"
+    fi
+  fi
+}
+
+check_docker_compose() {
+  if docker compose version &>/dev/null 2>&1; then
+    DC="docker compose"
+    ok "docker compose v2 ($(docker compose version --short 2>/dev/null || echo '?'))"
+    return 0
+  fi
+
+  if command -v docker-compose &>/dev/null; then
+    DC="docker-compose"
+    ok "docker-compose v1 $(docker-compose --version | grep -oP '\d+\.\d+\.\d+' | head -1)"
+    return 0
+  fi
+
+  # Compose manquant → tenter l'installation sur Linux
+  if [ "$OS_TYPE" = "Linux" ]; then
+    warn "Docker Compose plugin absent — installation…"
+    # Essayer via apt/dnf d'abord, sinon binaire direct
+    if command -v apt-get &>/dev/null; then
+      sudo apt-get install -y docker-compose-plugin 2>/dev/null \
+        || sudo apt-get install -y docker-compose 2>/dev/null \
+        || true
+    elif command -v dnf &>/dev/null; then
+      sudo dnf install -y docker-compose-plugin 2>/dev/null || true
+    fi
+
+    # Vérifier à nouveau
+    if docker compose version &>/dev/null 2>&1; then
+      DC="docker compose"
+      ok "docker compose installé"
+      return 0
+    fi
+
+    # Fallback : installer le binaire standalone
+    COMPOSE_VERSION="2.27.0"
+    COMPOSE_ARCH="$(uname -m)"
+    [ "$COMPOSE_ARCH" = "aarch64" ] && COMPOSE_ARCH="aarch64" || COMPOSE_ARCH="x86_64"
+    COMPOSE_URL="https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
+    info "Installation de docker compose ${COMPOSE_VERSION}…"
+    sudo curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+    DC="docker-compose"
+    ok "docker-compose ${COMPOSE_VERSION} installé"
+  else
+    fatal "Docker Compose introuvable. Installez Docker Desktop (inclut Compose)."
+  fi
+}
+
 # ─── Banner ───────────────────────────────────────────────────────────────────
 
 banner
 
-# ─── Step 1 : Prerequisites ──────────────────────────────────────────────────
+# ─── Step 1 : OS + Docker ────────────────────────────────────────────────────
 
 step "Vérification des prérequis"
 
-for cmd in docker curl openssl; do
-  command -v "$cmd" &>/dev/null && ok "$cmd" || fatal "$cmd requis mais introuvable"
+OS_TYPE="$(uname -s)"
+ok "OS : ${OS_TYPE} ($(uname -m))"
+
+# openssl et curl sont toujours requis
+for cmd in curl openssl; do
+  if command -v "$cmd" &>/dev/null; then
+    ok "$cmd"
+  else
+    if [ "$OS_TYPE" = "Linux" ]; then
+      warn "$cmd absent — installation…"
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y "$cmd"
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y "$cmd"
+      elif command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm "$cmd"
+      else
+        fatal "$cmd est requis mais ne peut pas être installé automatiquement"
+      fi
+      ok "$cmd installé"
+    else
+      fatal "$cmd est requis. Installez-le avec Homebrew : brew install $cmd"
+    fi
+  fi
 done
 
-if docker compose version &>/dev/null 2>&1; then
-  DC="docker compose"; ok "docker compose (v2)"
-elif command -v docker-compose &>/dev/null; then
-  DC="docker-compose"; ok "docker-compose (v1)"
-else
-  fatal "docker compose introuvable"
-fi
+# Docker (installation automatique si absent)
+check_and_install_docker
 
-docker info &>/dev/null || fatal "Le daemon Docker n'est pas démarré"
-
-OS_TYPE="$(uname -s)"
-ok "OS : ${OS_TYPE}"
+# Docker Compose
+check_docker_compose
 
 # ─── Step 2 : Configuration ──────────────────────────────────────────────────
 
@@ -143,8 +426,6 @@ else
   if command -v ip &>/dev/null; then
     LOCAL_NET=$(ip route 2>/dev/null \
       | awk '/proto kernel/ && !/^169/ {split($1,a,"."); print a[1]"."a[2]"."a[3]".0/24"; exit}')
-  elif command -v ipconfig &>/dev/null; then
-    LOCAL_NET="192.168.1.0/24"
   fi
   ask SCAN_NETWORKS "Réseaux à scanner (CIDRs, virgule)" "${LOCAL_NET:-192.168.1.0/24}"
   ask SCAN_INTERVAL "Intervalle de scan (secondes)"      "300"
@@ -185,6 +466,33 @@ fi
 # Charger le .env
 set -a; source .env; set +a
 
+# ─── Step 2b : Agent binaries ─────────────────────────────────────────────────
+
+step "Binaires de l'agent Go"
+
+if [ -d "downloads" ] && ls downloads/netmap-agent-linux-* &>/dev/null 2>&1; then
+  ok "Binaires déjà présents dans downloads/"
+elif command -v go &>/dev/null; then
+  askyn BUILD_AGENT "Compiler les binaires agent (amd64 / arm64 / arm) ?" "y"
+  if [ "$BUILD_AGENT" = "y" ]; then
+    mkdir -p downloads
+    info "Compilation agent linux/amd64…"
+    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-amd64 .)
+    info "Compilation agent linux/arm64…"
+    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm64 .)
+    info "Compilation agent linux/arm…"
+    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm   go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm   .)
+    ok "Binaires compilés dans downloads/"
+  else
+    warn "Sans binaires, l'installation one-liner de l'agent ne fonctionnera pas"
+    info "Compilez manuellement : cd agent && go build -o ../downloads/netmap-agent-linux-amd64 ."
+  fi
+else
+  warn "Go non installé — binaires agent non compilés"
+  info "Installez Go puis : cd agent && go build -ldflags=\"-s -w\" -o ../downloads/netmap-agent-linux-amd64 ."
+  mkdir -p downloads
+fi
+
 # ─── Step 3 : Build ──────────────────────────────────────────────────────────
 
 step "Build des images Docker"
@@ -201,7 +509,6 @@ step "Démarrage des services"
 $DC up -d server frontend
 ok "Conteneurs démarrés"
 
-# Attendre que le serveur soit prêt
 echo -ne "  Attente du serveur"
 for i in $(seq 1 40); do
   if curl -sf "http://localhost:3000/api/health" &>/dev/null 2>&1; then
@@ -267,7 +574,6 @@ if [ "$OS_TYPE" = "Linux" ]; then
     info "Créez un token scope 'scanner' dans l'interface admin, puis relancez setup.sh"
   fi
 else
-  # macOS / autre
   HOST_IP=$(ipconfig getifaddr en0 2>/dev/null \
     || ip route get 1 2>/dev/null | awk '{print $7; exit}' \
     || echo "<IP-DE-CE-SERVEUR>")
