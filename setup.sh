@@ -78,6 +78,15 @@ gen()  { openssl rand -hex 32; }
 genp() { openssl rand -base64 16 | tr -d '/+=' | head -c 20; }
 sedi() { sed -i "$@"; }
 
+# Écrit KEY='VALUE' dans .env — gère tous les caractères spéciaux ($, !, \, ')
+# Usage : write_env KEY value
+write_env() {
+  local key="$1" val="$2"
+  # Échapper les guillemets simples dans la valeur : ' → '\''
+  local esc="${val//\'/\'\\\'\'}"
+  printf "%s='%s'\n" "$key" "$esc" >> .env
+}
+
 # Valeurs par défaut globales
 DC="docker compose"
 NEED_SUDO_DOCKER=n
@@ -324,7 +333,7 @@ if [ -f ".env" ] && grep -q "^NETMAP_PORT" .env 2>/dev/null; then
   warn ".env existant détecté (format compatible)"
   askyn REUSE_ENV "Réutiliser la configuration existante ? (non = reconfigurer)" "y"
   if [ "$REUSE_ENV" = "y" ]; then
-    set -a; source .env; set +a
+    set +u; set -a; source .env; set +a; set -u
     ok ".env chargé"
     REINSTALL=y
   fi
@@ -361,7 +370,7 @@ if [ "$REUSE_ENV" = "n" ]; then
     ask   PROXMOX_HOST "Proxmox host:port" "192.168.1.200:8006"
     ask   PROXMOX_USER "Proxmox user"      "root@pam"
     askpw PROXMOX_PASS "Proxmox password"
-    local tls_ans=""
+    tls_ans=""
     askyn tls_ans "Ignorer le certificat auto-signé ? (recommandé homelab)" "y"
     [ "$tls_ans" = "y" ] && PROXMOX_TLS="0" || PROXMOX_TLS="1"
   fi
@@ -385,34 +394,38 @@ if [ "$REUSE_ENV" = "n" ]; then
   SCANNER_TOKEN=""
 
   # ── Écriture du .env ──────────────────────────────────────────────────────
-  cat > .env <<ENVEOF
-# Généré par NetMap setup.sh — $(date)
+  # On utilise write_env() pour entourer chaque valeur de guillemets simples,
+  # ce qui évite l'expansion de $!, $?, etc. lors du chargement ultérieur.
+  printf '# Généré par NetMap setup.sh — %s\n\n' "$(date)" > .env
 
-NETMAP_PORT=${NETMAP_PORT}
+  write_env "NETMAP_PORT"          "$NETMAP_PORT"
+  printf '\n' >> .env
 
-JWT_SECRET=${JWT_SECRET}
-JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
-AGENT_TOKEN_SALT=${AGENT_TOKEN_SALT}
+  write_env "JWT_SECRET"           "$JWT_SECRET"
+  write_env "JWT_REFRESH_SECRET"   "$JWT_REFRESH_SECRET"
+  write_env "AGENT_TOKEN_SALT"     "$AGENT_TOKEN_SALT"
+  printf '\n' >> .env
 
-NETMAP_ADMIN_PASS=${NETMAP_ADMIN_PASS}
+  write_env "NETMAP_ADMIN_PASS"    "$NETMAP_ADMIN_PASS"
+  printf '\n' >> .env
 
-PROXMOX_HOST=${PROXMOX_HOST}
-PROXMOX_USER=${PROXMOX_USER}
-PROXMOX_PASS=${PROXMOX_PASS}
-PROXMOX_POLL=60
-PROXMOX_TLS=${PROXMOX_TLS}
+  write_env "PROXMOX_HOST"         "${PROXMOX_HOST:-}"
+  write_env "PROXMOX_USER"         "${PROXMOX_USER:-root@pam}"
+  write_env "PROXMOX_PASS"         "${PROXMOX_PASS:-}"
+  printf 'PROXMOX_POLL=60\n'       >> .env
+  write_env "PROXMOX_TLS"          "$PROXMOX_TLS"
+  printf '\n' >> .env
 
-SCANNER_TOKEN=
-SCAN_NETWORKS=${SCAN_NETWORKS}
-SCAN_INTERVAL=${SCAN_INTERVAL}
-NMAP_ARGS=-sV --top-ports 50 -O --osscan-limit -T4
-ENVEOF
+  printf 'SCANNER_TOKEN=\n'        >> .env
+  write_env "SCAN_NETWORKS"        "$SCAN_NETWORKS"
+  write_env "SCAN_INTERVAL"        "$SCAN_INTERVAL"
+  printf "NMAP_ARGS='-sV --top-ports 50 -O --osscan-limit -T4'\n" >> .env
 
   [ -f ".env" ] && ok ".env créé" || fatal "Impossible d'écrire le fichier .env !"
 fi
 
 # Chargement garanti du .env dans l'environnement
-set -a; source .env; set +a
+set +u; set -a; source .env; set +a; set -u
 
 # ─── Étape 2b : Binaires agent Go ─────────────────────────────────────────────
 
@@ -426,7 +439,6 @@ elif command -v go &>/dev/null; then
   local_build_agent=""
   askyn local_build_agent "Compiler les binaires agent (amd64 / arm64 / arm) ?" "y"
   if [ "$local_build_agent" = "y" ]; then
-    local goarch
     for goarch in amd64 arm64 arm; do
       info "Compilation linux/${goarch}…"
       if (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
@@ -556,7 +568,7 @@ if [ -n "${SCANNER_TOKEN:-}" ]; then
   local_scanner=""
   askyn local_scanner "Démarrer le scanner ARP maintenant ?" "y"
   if [ "$local_scanner" = "y" ]; then
-    set -a; source .env; set +a
+    set +u; set -a; source .env; set +a; set -u
     if $DC --profile scanner up -d scanner; then
       ok "Scanner démarré (réseaux: ${SCAN_NETWORKS}, intervalle: ${SCAN_INTERVAL}s)"
     else
