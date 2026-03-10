@@ -69,6 +69,10 @@ genp() { openssl rand -base64 16 | tr -d '/+=' | head -c 20; }
 
 sedi() { sed -i "$@"; }
 
+# Valeur par défaut — surchargée par check_docker_compose()
+DC="docker compose"
+NEED_SUDO_DOCKER=n   # mis à "y" si l'utilisateur vient d'être ajouté au groupe docker
+
 # ─── Docker installation ─────────────────────────────────────────────────────
 
 # Lit /etc/os-release et expose :
@@ -177,7 +181,7 @@ install_docker_linux() {
         if [ "${EUID:-$(id -u)}" -ne 0 ] && ! id -nG "$USER" | grep -qw docker; then
           sudo addgroup "$USER" docker 2>/dev/null || sudo usermod -aG docker "$USER" 2>/dev/null || true
           warn "Utilisateur '$USER' ajouté au groupe 'docker' (reconnectez-vous)"
-          [ "$DC" = "docker compose" ] && DC="sudo docker compose" || DC="sudo docker-compose"
+          NEED_SUDO_DOCKER=y
         fi
         ok "Docker installé avec succès"
         return 0
@@ -198,7 +202,7 @@ install_docker_linux() {
       warn "Utilisateur '$USER' ajouté au groupe 'docker'"
       warn "Les prochaines sessions n'auront pas besoin de sudo"
       warn "Pour cette session, on continue avec 'sudo docker'…"
-      [ "$DC" = "docker compose" ] && DC="sudo docker compose" || DC="sudo docker-compose"
+      NEED_SUDO_DOCKER=y
     fi
   fi
 
@@ -247,15 +251,20 @@ check_and_install_docker() {
 }
 
 check_docker_compose() {
-  if docker compose version &>/dev/null 2>&1; then
-    DC="docker compose"
-    ok "docker compose v2 ($(docker compose version --short 2>/dev/null || echo '?'))"
+  # Si l'utilisateur vient d'être ajouté au groupe docker dans cette session,
+  # il faut sudo pour les commandes docker jusqu'à la prochaine connexion.
+  local prefix=""
+  [ "$NEED_SUDO_DOCKER" = "y" ] && prefix="sudo "
+
+  if ${prefix}docker compose version &>/dev/null 2>&1; then
+    DC="${prefix}docker compose"
+    ok "${DC} v2"
     return 0
   fi
 
-  if command -v docker-compose &>/dev/null; then
-    DC="docker-compose"
-    ok "docker-compose v1 $(docker-compose --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  if command -v docker-compose &>/dev/null && ${prefix}docker-compose version &>/dev/null 2>&1; then
+    DC="${prefix}docker-compose"
+    ok "${DC} v1"
     return 0
   fi
 
@@ -271,9 +280,9 @@ check_docker_compose() {
     sudo pacman -Sy --noconfirm docker-compose 2>/dev/null || true
   fi
 
-  if docker compose version &>/dev/null 2>&1; then
-    DC="docker compose"
-    ok "docker compose installé"
+  if ${prefix}docker compose version &>/dev/null 2>&1; then
+    DC="${prefix}docker compose"
+    ok "${DC} installé"
     return 0
   fi
 
@@ -285,8 +294,8 @@ check_docker_compose() {
   info "Installation de docker compose ${COMPOSE_VERSION}…"
   sudo curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose
   sudo chmod +x /usr/local/bin/docker-compose
-  DC="docker-compose"
-  ok "docker-compose ${COMPOSE_VERSION} installé"
+  DC="${prefix}docker-compose"
+  ok "${DC} ${COMPOSE_VERSION} installé"
 }
 
 # ─── Banner ───────────────────────────────────────────────────────────────────
