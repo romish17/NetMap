@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # NetMap — Interactive CLI Installer
 # Usage: ./setup.sh
+# Relancer pour une réinstallation : ./setup.sh
+#   → détecte le .env existant et propose de le réutiliser ou de reconfigurer
 
-set -euo pipefail
+# -u  : erreur sur variable non définie
+# -o pipefail : erreur si un élément d'un pipe échoue
+# PAS de -e : on gère les erreurs manuellement pour éviter les exits silencieux
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ─── Colors ──────────────────────────────────────────────────────────────────
+# ─── Couleurs ────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
@@ -35,6 +40,7 @@ warn()  { echo -e "  ${YELLOW}⚠${NC}  $1"; }
 info()  { echo -e "  ${DIM}$1${NC}"; }
 fatal() { echo -e "\n  ${RED}✗ $1${NC}\n"; exit 1; }
 
+# Lecture d'une valeur avec valeur par défaut optionnelle
 ask() {
   local -n _ref=$1
   local prompt="$2" default="${3:-}"
@@ -43,144 +49,134 @@ ask() {
   else
     echo -ne "  ${BOLD}${prompt}${NC}: "
   fi
-  read -r _ref
-  [ -z "$_ref" ] && _ref="$default"
+  read -r _ref || true
+  [ -z "${_ref:-}" ] && _ref="$default"
 }
 
+# Lecture d'un mot de passe (masqué)
 askpw() {
   local -n _ref=$1
   local prompt="$2"
   echo -ne "  ${BOLD}${prompt}${NC}: "
-  read -rs _ref; echo
+  read -rs _ref || true
+  echo
 }
 
+# Lecture oui/non
 askyn() {
   local -n _ref=$1
   local prompt="$2" default="${3:-y}"
-  local hint="[Y/n]"; [ "$default" = "n" ] && hint="[y/N]"
+  local hint="[Y/n]"
+  [ "$default" = "n" ] && hint="[y/N]"
   echo -ne "  ${BOLD}${prompt}${NC} ${DIM}${hint}${NC}: "
-  read -r _ref
-  [ -z "$_ref" ] && _ref="$default"
-  [[ "$_ref" =~ ^[Yy] ]] && _ref="y" || _ref="n"
+  read -r _ref || true
+  [ -z "${_ref:-}" ] && _ref="$default"
+  if [[ "${_ref:-n}" =~ ^[Yy] ]]; then _ref="y"; else _ref="n"; fi
 }
 
 gen()  { openssl rand -hex 32; }
 genp() { openssl rand -base64 16 | tr -d '/+=' | head -c 20; }
-
 sedi() { sed -i "$@"; }
 
-# Valeur par défaut — surchargée par check_docker_compose()
+# Valeurs par défaut globales
 DC="docker compose"
-NEED_SUDO_DOCKER=n   # mis à "y" si l'utilisateur vient d'être ajouté au groupe docker
+NEED_SUDO_DOCKER=n
 
-# ─── Docker installation ─────────────────────────────────────────────────────
+# ─── Détection distro ─────────────────────────────────────────────────────────
 
-# Lit /etc/os-release et expose :
-#   DISTRO_ID       (ex: ubuntu, debian, fedora, arch, alpine…)
-#   DISTRO_NAME     (ex: "Ubuntu 22.04.3 LTS")
-#   DISTRO_ID_LIKE  (ex: "debian" pour Linux Mint, "rhel fedora" pour CentOS)
 detect_distro() {
-  DISTRO_ID="unknown"; DISTRO_NAME="Linux"; DISTRO_ID_LIKE=""; DISTRO_VERSION=""
-  if [ -f /etc/os-release ]; then
-    # shellcheck source=/dev/null
-    . /etc/os-release
-    DISTRO_ID="${ID:-unknown}"
-    DISTRO_NAME="${PRETTY_NAME:-${NAME:-Linux}}"
-    DISTRO_VERSION="${VERSION_ID:-}"
-    DISTRO_ID_LIKE="${ID_LIKE:-}"
-  fi
+  DISTRO_ID="unknown"
+  DISTRO_NAME="Linux"
+  DISTRO_ID_LIKE=""
+
+  if [ ! -f /etc/os-release ]; then return; fi
+
+  # Lire uniquement les champs nécessaires sans polluer l'environnement global
+  local line key val
+  while IFS='=' read -r key val; do
+    val="${val//\"/}"   # enlever les guillemets
+    case "$key" in
+      ID)          DISTRO_ID="$val" ;;
+      ID_LIKE)     DISTRO_ID_LIKE="$val" ;;
+      PRETTY_NAME) DISTRO_NAME="$val" ;;
+      NAME)        [ -z "${DISTRO_NAME:-}" ] && DISTRO_NAME="$val" ;;
+    esac
+  done < /etc/os-release
 }
 
-# Lance l'installation Docker adaptée à la distribution détectée.
-# Affiche la distro + la méthode choisie, demande confirmation.
+# ─── Installation Docker ──────────────────────────────────────────────────────
+
 install_docker_linux() {
   step "Installation de Docker"
   detect_distro
-
   echo -e "  Distribution : ${BOLD}${DISTRO_NAME}${NC}"
   echo
 
-  # ── Choisir la méthode selon l'ID de la distro ──────────────────────────────
+  # Choisir la méthode selon l'ID de la distro
   local method=""
-
   case "$DISTRO_ID" in
-
-    # ── Arch Linux et dérivés ──────────────────────────────────────────────────
     arch|manjaro|endeavouros|garuda|cachyos)
-      method="pacman"
-      ;;
-
-    # ── Alpine Linux ───────────────────────────────────────────────────────────
+      method="pacman" ;;
     alpine)
-      method="apk"
-      ;;
-
-    # ── Distros officiellement supportées par get.docker.com ──────────────────
+      method="apk" ;;
     ubuntu|debian|raspbian|linuxmint|pop|kali|elementary|neon|\
     centos|rhel|fedora|almalinux|rocky|ol|amzn|\
     opensuse-leap|opensuse-tumbleweed|sles)
-      method="get.docker.com"
-      ;;
-
-    # ── Distros dérivées non listées : vérifier ID_LIKE ───────────────────────
+      method="get.docker.com" ;;
     *)
-      for like in $DISTRO_ID_LIKE; do
+      # Essayer via ID_LIKE pour les distros dérivées
+      local like
+      for like in ${DISTRO_ID_LIKE:-}; do
         case "$like" in
-          debian|ubuntu)              method="get.docker.com"; break ;;
-          rhel|fedora|centos)         method="get.docker.com"; break ;;
-          suse|opensuse)              method="get.docker.com"; break ;;
-          arch)                       method="pacman";          break ;;
-          alpine)                     method="apk";             break ;;
+          debian|ubuntu)        method="get.docker.com"; break ;;
+          rhel|fedora|centos)   method="get.docker.com"; break ;;
+          suse|opensuse)        method="get.docker.com"; break ;;
+          arch)                 method="pacman";          break ;;
+          alpine)               method="apk";             break ;;
         esac
       done
       ;;
   esac
 
-  # ── Affichage + confirmation avant d'agir ───────────────────────────────────
-  if [ "$method" = "get.docker.com" ]; then
-    echo -e "  Méthode      : ${BOLD}Script officiel Docker${NC} ${DIM}(get.docker.com)${NC}"
-  elif [ "$method" = "pacman" ]; then
-    echo -e "  Méthode      : ${BOLD}pacman${NC} ${DIM}(Arch Linux)${NC}"
-  elif [ "$method" = "apk" ]; then
-    echo -e "  Méthode      : ${BOLD}apk${NC} ${DIM}(Alpine Linux)${NC}"
-  else
-    echo
+  if [ -z "$method" ]; then
     warn "Distribution non reconnue (ID=${DISTRO_ID})"
-    echo -e "  Consultez la documentation officielle :"
-    echo -e "  ${CYAN}https://docs.docker.com/engine/install/${NC}"
-    echo
+    echo -e "  Documentation : ${CYAN}https://docs.docker.com/engine/install/${NC}"
     fatal "Installez Docker manuellement puis relancez setup.sh"
   fi
 
-  echo
-  askyn DO_INSTALL "Lancer l'installation maintenant ?" "y"
-  [ "$DO_INSTALL" = "n" ] && fatal "Docker est requis pour continuer"
-
-  # ── Exécution ────────────────────────────────────────────────────────────────
   case "$method" in
+    get.docker.com) echo -e "  Méthode : ${BOLD}Script officiel Docker${NC} ${DIM}(get.docker.com)${NC}" ;;
+    pacman)         echo -e "  Méthode : ${BOLD}pacman${NC}" ;;
+    apk)            echo -e "  Méthode : ${BOLD}apk${NC}" ;;
+  esac
+  echo
 
+  local do_install
+  askyn do_install "Lancer l'installation ?" "y"
+  [ "$do_install" = "n" ] && fatal "Docker est requis pour continuer"
+
+  case "$method" in
     get.docker.com)
-      info "Téléchargement du script officiel…"
-      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-      sudo sh /tmp/get-docker.sh
+      info "Téléchargement du script officiel Docker…"
+      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh \
+        || fatal "Impossible de télécharger get.docker.com"
+      sudo sh /tmp/get-docker.sh || fatal "Échec de l'installation Docker"
       rm -f /tmp/get-docker.sh
       ;;
-
     pacman)
-      sudo pacman -Sy --noconfirm docker
+      sudo pacman -Sy --noconfirm docker || fatal "Échec de l'installation Docker"
       ;;
-
     apk)
-      sudo apk add --no-cache docker docker-cli-compose
-      # Alpine utilise OpenRC plutôt que systemd
+      sudo apk add --no-cache docker docker-cli-compose \
+        || fatal "Échec de l'installation Docker"
       if command -v rc-update &>/dev/null; then
         sudo rc-update add docker default
         sudo service docker start
         ok "Docker démarré via OpenRC"
-        # Groupes + user
-        if [ "${EUID:-$(id -u)}" -ne 0 ] && ! id -nG "$USER" | grep -qw docker; then
-          sudo addgroup "$USER" docker 2>/dev/null || sudo usermod -aG docker "$USER" 2>/dev/null || true
-          warn "Utilisateur '$USER' ajouté au groupe 'docker' (reconnectez-vous)"
+        if [ "${EUID:-$(id -u)}" -ne 0 ] && ! id -nG "$USER" 2>/dev/null | grep -qw docker; then
+          sudo addgroup "$USER" docker 2>/dev/null \
+            || sudo usermod -aG docker "$USER" 2>/dev/null || true
+          warn "Utilisateur '$USER' ajouté au groupe 'docker'"
           NEED_SUDO_DOCKER=y
         fi
         ok "Docker installé avec succès"
@@ -189,19 +185,17 @@ install_docker_linux() {
       ;;
   esac
 
-  # ── systemd : activer + démarrer ────────────────────────────────────────────
+  # systemd : activer et démarrer
   if command -v systemctl &>/dev/null; then
-    sudo systemctl enable --now docker
+    sudo systemctl enable --now docker || warn "systemctl enable docker échoué"
     ok "Service Docker activé et démarré"
   fi
 
-  # ── Groupe docker pour l'utilisateur courant ────────────────────────────────
+  # Ajouter l'utilisateur courant au groupe docker
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    if ! id -nG "$USER" | grep -qw docker; then
-      sudo usermod -aG docker "$USER"
-      warn "Utilisateur '$USER' ajouté au groupe 'docker'"
-      warn "Les prochaines sessions n'auront pas besoin de sudo"
-      warn "Pour cette session, on continue avec 'sudo docker'…"
+    if ! id -nG "$USER" 2>/dev/null | grep -qw docker; then
+      sudo usermod -aG docker "$USER" && \
+        warn "Utilisateur '$USER' ajouté au groupe 'docker' — sudo utilisé pour cette session"
       NEED_SUDO_DOCKER=y
     fi
   fi
@@ -210,70 +204,58 @@ install_docker_linux() {
 }
 
 check_and_install_docker() {
-  local docker_found=n
-  local daemon_running=n
-
-  command -v docker &>/dev/null && docker_found=y
-  [ "$docker_found" = "y" ] && docker info &>/dev/null 2>&1 && daemon_running=y
-
-  # ── Cas 1 : Docker présent et daemon actif ───────────────────────────────────
-  if [ "$docker_found" = "y" ] && [ "$daemon_running" = "y" ]; then
-    DOCKER_VER=$(docker --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    ok "Docker ${DOCKER_VER} (daemon actif)"
+  if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    local ver
+    ver=$(docker --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    ok "Docker ${ver}"
     return 0
   fi
 
-  # ── Cas 2 : Docker absent → installation ────────────────────────────────────
-  if [ "$docker_found" = "n" ]; then
-    install_docker_linux    # affiche distro + méthode + demande confirmation
-
-  # ── Cas 3 : Docker installé mais daemon inactif ──────────────────────────────
+  if ! command -v docker &>/dev/null; then
+    install_docker_linux
   else
-    warn "Docker est installé mais le daemon est arrêté"
+    warn "Docker installé mais le daemon est arrêté"
     if command -v systemctl &>/dev/null; then
       info "Démarrage du service Docker…"
       sudo systemctl start docker
       sleep 2
-      if docker info &>/dev/null 2>&1; then
-        ok "Docker daemon démarré"
-      else
-        fatal "Impossible de démarrer Docker. Diagnostic : sudo systemctl status docker"
-      fi
+      docker info &>/dev/null 2>&1 \
+        && ok "Docker daemon démarré" \
+        || fatal "Impossible de démarrer Docker. Diagnostic : sudo systemctl status docker"
     elif command -v service &>/dev/null; then
       sudo service docker start
       sleep 2
-      docker info &>/dev/null 2>&1 && ok "Docker daemon démarré" \
+      docker info &>/dev/null 2>&1 \
+        && ok "Docker daemon démarré" \
         || fatal "Impossible de démarrer Docker. Lancez-le manuellement."
     else
-      fatal "Impossible de démarrer Docker automatiquement. Lancez-le manuellement."
+      fatal "Impossible de démarrer Docker automatiquement."
     fi
   fi
 }
 
 check_docker_compose() {
-  # Si l'utilisateur vient d'être ajouté au groupe docker dans cette session,
-  # il faut sudo pour les commandes docker jusqu'à la prochaine connexion.
   local prefix=""
   [ "$NEED_SUDO_DOCKER" = "y" ] && prefix="sudo "
 
   if ${prefix}docker compose version &>/dev/null 2>&1; then
     DC="${prefix}docker compose"
-    ok "${DC} v2"
+    local ver
+    ver=$(${prefix}docker compose version --short 2>/dev/null || echo "v2")
+    ok "${DC} (${ver})"
     return 0
   fi
 
   if command -v docker-compose &>/dev/null && ${prefix}docker-compose version &>/dev/null 2>&1; then
     DC="${prefix}docker-compose"
-    ok "${DC} v1"
+    ok "${DC}"
     return 0
   fi
 
-  # Compose manquant → installation automatique
-  warn "Docker Compose plugin absent — installation…"
+  warn "Docker Compose absent — installation…"
   if command -v apt-get &>/dev/null; then
     sudo apt-get install -y docker-compose-plugin 2>/dev/null \
-      || sudo apt-get install -y docker-compose 2>/dev/null \
-      || true
+      || sudo apt-get install -y docker-compose 2>/dev/null || true
   elif command -v dnf &>/dev/null; then
     sudo dnf install -y docker-compose-plugin 2>/dev/null || true
   elif command -v pacman &>/dev/null; then
@@ -286,118 +268,124 @@ check_docker_compose() {
     return 0
   fi
 
-  # Fallback : binaire standalone depuis GitHub
-  COMPOSE_VERSION="2.27.0"
-  COMPOSE_ARCH="$(uname -m)"
-  [ "$COMPOSE_ARCH" = "aarch64" ] && COMPOSE_ARCH="aarch64" || COMPOSE_ARCH="x86_64"
-  COMPOSE_URL="https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"
-  info "Installation de docker compose ${COMPOSE_VERSION}…"
-  sudo curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose
+  # Fallback : binaire standalone GitHub
+  local arch ver_comp url
+  arch="$(uname -m)"
+  [ "$arch" = "aarch64" ] && arch="aarch64" || arch="x86_64"
+  ver_comp="2.27.0"
+  url="https://github.com/docker/compose/releases/download/v${ver_comp}/docker-compose-linux-${arch}"
+  info "Téléchargement docker compose ${ver_comp}…"
+  sudo curl -fsSL "$url" -o /usr/local/bin/docker-compose \
+    || fatal "Impossible de télécharger docker-compose"
   sudo chmod +x /usr/local/bin/docker-compose
   DC="${prefix}docker-compose"
-  ok "${DC} ${COMPOSE_VERSION} installé"
+  ok "${DC} ${ver_comp} installé"
 }
 
-# ─── Banner ───────────────────────────────────────────────────────────────────
-
+# ─────────────────────────────────────────────────────────────────────────────
 banner
 
-# ─── Step 1 : OS + Docker ────────────────────────────────────────────────────
+# ─── Étape 1 : Prérequis ─────────────────────────────────────────────────────
 
 step "Vérification des prérequis"
 
-OS_TYPE="$(uname -s)"
-[ "$OS_TYPE" != "Linux" ] && fatal "setup.sh est prévu pour Linux uniquement (détecté : $OS_TYPE)"
+[ "$(uname -s)" != "Linux" ] && fatal "setup.sh est prévu pour Linux uniquement"
 ok "Linux ($(uname -m))"
 
-# curl et openssl sont requis — installation automatique si absents
 for cmd in curl openssl; do
   if command -v "$cmd" &>/dev/null; then
     ok "$cmd"
   else
     warn "$cmd absent — installation…"
     if command -v apt-get &>/dev/null; then
-      sudo apt-get install -y "$cmd"
+      sudo apt-get install -y "$cmd" || fatal "Impossible d'installer $cmd"
     elif command -v dnf &>/dev/null; then
-      sudo dnf install -y "$cmd"
+      sudo dnf install -y "$cmd" || fatal "Impossible d'installer $cmd"
     elif command -v pacman &>/dev/null; then
-      sudo pacman -Sy --noconfirm "$cmd"
+      sudo pacman -Sy --noconfirm "$cmd" || fatal "Impossible d'installer $cmd"
     else
-      fatal "$cmd est requis mais ne peut pas être installé automatiquement"
+      fatal "$cmd est requis. Installez-le manuellement."
     fi
     ok "$cmd installé"
   fi
 done
 
-# Docker (installation automatique si absent)
 check_and_install_docker
-
-# Docker Compose
 check_docker_compose
 
-# ─── Step 2 : Configuration ──────────────────────────────────────────────────
+# ─── Étape 2 : Configuration ──────────────────────────────────────────────────
 
 step "Configuration"
 
 REUSE_ENV="n"
-if [ -f ".env" ]; then
-  if grep -q "^NETMAP_PORT" .env 2>/dev/null; then
-    # .env compatible avec la version actuelle
-    warn ".env existant détecté"
-    askyn REUSE_ENV "Réutiliser le .env existant ?" "y"
-  else
-    # .env d'un ancien format (ex : avec DOMAIN/ACME_EMAIL pour Traefik)
-    warn ".env détecté mais format obsolète — il sera sauvegardé et régénéré"
-    cp .env ".env.bak.$(date +%Y%m%d_%H%M%S)"
-    ok "Ancienne config sauvegardée (.env.bak.*)"
-    REUSE_ENV="n"
+REINSTALL=n
+
+if [ -f ".env" ] && grep -q "^NETMAP_PORT" .env 2>/dev/null; then
+  warn ".env existant détecté (format compatible)"
+  askyn REUSE_ENV "Réutiliser la configuration existante ? (non = reconfigurer)" "y"
+  if [ "$REUSE_ENV" = "y" ]; then
+    set -a; source .env; set +a
+    ok ".env chargé"
+    REINSTALL=y
   fi
+elif [ -f ".env" ]; then
+  warn ".env détecté mais format obsolète — il sera sauvegardé et régénéré"
+  cp .env ".env.bak.$(date +%Y%m%d_%H%M%S)"
+  ok "Ancienne config sauvegardée (.env.bak.*)"
 fi
 
-if [ "$REUSE_ENV" = "y" ]; then
-  set -a; source .env; set +a
-  ok ".env chargé"
-else
-  # ── Port ──
-  ask NETMAP_PORT "Port HTTP de l'interface" "8080"
+if [ "$REUSE_ENV" = "n" ]; then
 
-  # ── Admin password ──
+  # ── Port ──────────────────────────────────────────────────────────────────
+  ask NETMAP_PORT "Port HTTP de l'interface" "8080"
   echo
-  echo -ne "  ${BOLD}Mot de passe admin${NC} ${DIM}[générer automatiquement]${NC}: "
-  read -rs NETMAP_ADMIN_PASS; echo
-  if [ -z "$NETMAP_ADMIN_PASS" ]; then
+
+  # ── Mot de passe admin ────────────────────────────────────────────────────
+  echo -ne "  ${BOLD}Mot de passe admin${NC} ${DIM}[laisser vide = générer]${NC}: "
+  read -rs NETMAP_ADMIN_PASS || true
+  echo
+  if [ -z "${NETMAP_ADMIN_PASS:-}" ]; then
     NETMAP_ADMIN_PASS="$(genp)"
     ok "Mot de passe généré : ${BOLD}${GREEN}${NETMAP_ADMIN_PASS}${NC}  ${RED}← notez-le !${NC}"
   fi
-
-  # ── Proxmox ──
   echo
-  askyn PROXMOX_ENABLE "Configurer l'intégration Proxmox ?" "n"
-  PROXMOX_HOST=""; PROXMOX_USER="root@pam"; PROXMOX_PASS=""; PROXMOX_TLS="0"
-  if [ "$PROXMOX_ENABLE" = "y" ]; then
+
+  # ── Proxmox ───────────────────────────────────────────────────────────────
+  local_proxmox_enable=""
+  askyn local_proxmox_enable "Configurer l'intégration Proxmox ?" "n"
+  PROXMOX_HOST=""
+  PROXMOX_USER="root@pam"
+  PROXMOX_PASS=""
+  PROXMOX_TLS="0"
+  if [ "$local_proxmox_enable" = "y" ]; then
     ask   PROXMOX_HOST "Proxmox host:port" "192.168.1.200:8006"
     ask   PROXMOX_USER "Proxmox user"      "root@pam"
     askpw PROXMOX_PASS "Proxmox password"
+    local tls_ans=""
+    askyn tls_ans "Ignorer le certificat auto-signé ? (recommandé homelab)" "y"
+    [ "$tls_ans" = "y" ] && PROXMOX_TLS="0" || PROXMOX_TLS="1"
   fi
-
-  # ── Scanner networks ──
   echo
+
+  # ── Réseaux à scanner ─────────────────────────────────────────────────────
   LOCAL_NET=""
   if command -v ip &>/dev/null; then
     LOCAL_NET=$(ip route 2>/dev/null \
-      | awk '/proto kernel/ && !/^169/ {split($1,a,"."); print a[1]"."a[2]"."a[3]".0/24"; exit}')
+      | awk '/proto kernel/ && !/^169\./ {
+          split($1,a,"."); printf "%s.%s.%s.0/24",a[1],a[2],a[3]; exit
+        }' || true)
   fi
   ask SCAN_NETWORKS "Réseaux à scanner (CIDRs, virgule)" "${LOCAL_NET:-192.168.1.0/24}"
   ask SCAN_INTERVAL "Intervalle de scan (secondes)"      "300"
 
-  # ── Generate secrets ──
+  # ── Génération des secrets ────────────────────────────────────────────────
   JWT_SECRET=$(gen)
   JWT_REFRESH_SECRET=$(gen)
   AGENT_TOKEN_SALT=$(gen)
   SCANNER_TOKEN=""
 
-  # ── Write .env ──
-  cat > .env << ENVEOF
+  # ── Écriture du .env ──────────────────────────────────────────────────────
+  cat > .env <<ENVEOF
 # Généré par NetMap setup.sh — $(date)
 
 NETMAP_PORT=${NETMAP_PORT}
@@ -420,157 +408,181 @@ SCAN_INTERVAL=${SCAN_INTERVAL}
 NMAP_ARGS=-sV --top-ports 50 -O --osscan-limit -T4
 ENVEOF
 
-  ok ".env créé"
+  [ -f ".env" ] && ok ".env créé" || fatal "Impossible d'écrire le fichier .env !"
 fi
 
-# Charger le .env
+# Chargement garanti du .env dans l'environnement
 set -a; source .env; set +a
 
-# ─── Step 2b : Agent binaries ─────────────────────────────────────────────────
+# ─── Étape 2b : Binaires agent Go ─────────────────────────────────────────────
 
 step "Binaires de l'agent Go"
 
-if [ -d "downloads" ] && ls downloads/netmap-agent-linux-* &>/dev/null 2>&1; then
+mkdir -p downloads
+
+if ls downloads/netmap-agent-linux-* &>/dev/null 2>&1; then
   ok "Binaires déjà présents dans downloads/"
 elif command -v go &>/dev/null; then
-  askyn BUILD_AGENT "Compiler les binaires agent (amd64 / arm64 / arm) ?" "y"
-  if [ "$BUILD_AGENT" = "y" ]; then
-    mkdir -p downloads
-    info "Compilation agent linux/amd64…"
-    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-amd64 .)
-    info "Compilation agent linux/arm64…"
-    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm64 .)
-    info "Compilation agent linux/arm…"
-    (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm   go build -ldflags="-s -w" -o ../downloads/netmap-agent-linux-arm   .)
-    ok "Binaires compilés dans downloads/"
+  local_build_agent=""
+  askyn local_build_agent "Compiler les binaires agent (amd64 / arm64 / arm) ?" "y"
+  if [ "$local_build_agent" = "y" ]; then
+    local goarch
+    for goarch in amd64 arm64 arm; do
+      info "Compilation linux/${goarch}…"
+      if (cd agent && CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
+          go build -ldflags="-s -w" -o "../downloads/netmap-agent-linux-${goarch}" . 2>&1); then
+        ok "linux/${goarch}"
+      else
+        warn "linux/${goarch} — échec (ignoré)"
+      fi
+    done
   else
-    warn "Sans binaires, l'installation one-liner de l'agent ne fonctionnera pas"
-    info "Compilez manuellement : cd agent && go build -o ../downloads/netmap-agent-linux-amd64 ."
+    info "Binaires non compilés. Pour les créer manuellement :"
+    info "  cd agent && go build -o ../downloads/netmap-agent-linux-amd64 ."
   fi
 else
   warn "Go non installé — binaires agent non compilés"
-  info "Installez Go puis : cd agent && go build -ldflags=\"-s -w\" -o ../downloads/netmap-agent-linux-amd64 ."
-  mkdir -p downloads
+  info "Pour les créer : cd agent && go build -ldflags=\"-s -w\" -o ../downloads/netmap-agent-linux-amd64 ."
 fi
 
-# ─── Step 3 : Build ──────────────────────────────────────────────────────────
+# ─── Étape 3 : Build Docker ───────────────────────────────────────────────────
 
 step "Build des images Docker"
-info "Premier build : quelques minutes selon la connexion…"
-echo
 
-$DC build --parallel
+# Réinstallation : arrêter les conteneurs en cours
+if [ "$REINSTALL" = "y" ]; then
+  info "Arrêt des conteneurs existants…"
+  $DC down --remove-orphans 2>/dev/null || true
+  ok "Conteneurs arrêtés"
+fi
+
+info "Build en cours (peut prendre plusieurs minutes)…"
+echo
+$DC build --parallel || fatal "Build Docker échoué — vérifiez les logs ci-dessus."
 ok "Images construites"
 
-# ─── Step 4 : Start ──────────────────────────────────────────────────────────
+# ─── Étape 4 : Démarrage ─────────────────────────────────────────────────────
 
 step "Démarrage des services"
 
-$DC up -d server frontend
-ok "Conteneurs démarrés"
+$DC up -d server frontend \
+  || fatal "Impossible de démarrer les conteneurs. Vérifiez : $DC logs"
+ok "Conteneurs lancés"
 
 # Attendre que le serveur soit healthy via docker inspect
-# (le port 3000 n'est pas exposé sur l'hôte — seul nginx:8080 l'est)
-echo -ne "  Attente du serveur (health check)"
+# (le port 3000 n'est pas exposé — on utilise l'état interne du conteneur)
+echo -ne "  Attente du serveur"
 SERVER_HEALTHY=n
-for i in $(seq 1 40); do
-  # Récupère le nom/id du conteneur server
-  SRV=$($DC ps -q server 2>/dev/null | head -1)
-  if [ -n "$SRV" ]; then
-    STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$SRV" 2>/dev/null || echo "")
-    if [ "$STATUS" = "healthy" ]; then
+for i in $(seq 1 50); do
+  SRV_ID=$($DC ps -q server 2>/dev/null | head -1 || true)
+  if [ -n "${SRV_ID:-}" ]; then
+    STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$SRV_ID" 2>/dev/null || echo "")
+    if [ "${STATUS:-}" = "healthy" ]; then
       echo -e " ${GREEN}✓${NC}"
       SERVER_HEALTHY=y
       break
     fi
   fi
   echo -n "."; sleep 2
-  if [ "$i" -eq 40 ]; then
+  if [ "$i" -eq 50 ]; then
     echo -e " ${YELLOW}timeout${NC}"
-    warn "Le serveur ne répond pas. Diagnostic : $DC logs server"
+    warn "Serveur non prêt après 100s"
+    warn "Diagnostic : $DC logs server"
   fi
 done
 
-# Attendre que nginx (frontend) soit également up sur le port exposé
+# Attendre que nginx soit joignable sur le port exposé
 if [ "$SERVER_HEALTHY" = "y" ]; then
-  echo -ne "  Attente de l'interface (nginx:${NETMAP_PORT:-8080})"
-  for i in $(seq 1 20); do
-    if curl -sf "http://localhost:${NETMAP_PORT:-8080}/api/health" &>/dev/null 2>&1; then
-      echo -e " ${GREEN}✓${NC}"; break
+  echo -ne "  Attente de l'interface (port ${NETMAP_PORT})"
+  for i in $(seq 1 25); do
+    if curl -sf "http://localhost:${NETMAP_PORT}/api/health" &>/dev/null 2>&1; then
+      echo -e " ${GREEN}✓${NC}"
+      break
     fi
     echo -n "."; sleep 2
-    if [ "$i" -eq 20 ]; then
+    if [ "$i" -eq 25 ]; then
       echo -e " ${YELLOW}timeout${NC}"
-      warn "nginx tarde à répondre. Diagnostic : $DC logs frontend"
+      warn "nginx non prêt. Diagnostic : $DC logs frontend"
     fi
   done
 fi
 
-# ─── Step 5 : Scanner token ──────────────────────────────────────────────────
+# ─── Étape 5 : Token scanner ──────────────────────────────────────────────────
 
 step "Token scanner"
 
-# Point d'entrée API : toujours via nginx (port exposé sur l'hôte)
-API_BASE="http://localhost:${NETMAP_PORT:-8080}"
+API_BASE="http://localhost:${NETMAP_PORT}"
 
 if [ -n "${SCANNER_TOKEN:-}" ]; then
   ok "Token scanner déjà configuré"
-else
+elif [ "$SERVER_HEALTHY" = "y" ]; then
   LOGIN=$(curl -sf -X POST "${API_BASE}/api/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"admin\",\"password\":\"${NETMAP_ADMIN_PASS}\"}" 2>/dev/null || echo '{}')
+    -d "{\"username\":\"admin\",\"password\":\"${NETMAP_ADMIN_PASS}\"}" \
+    2>/dev/null || echo '{}')
 
-  ACCESS_TOKEN=$(echo "$LOGIN" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+  ACCESS_TOKEN=$(echo "$LOGIN" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4 || true)
 
-  if [ -z "$ACCESS_TOKEN" ]; then
-    warn "Authentification échouée — créez le token manuellement dans l'interface admin"
-    info "→ http://localhost:${NETMAP_PORT:-8080} (onglet Admin › Tokens)"
+  if [ -z "${ACCESS_TOKEN:-}" ]; then
+    warn "Authentification échouée — créez le token manuellement"
+    info "→ ${API_BASE} › Admin › Tokens"
   else
     TOKEN_RESP=$(curl -sf -X POST "${API_BASE}/api/admin/tokens" \
       -H "Authorization: Bearer ${ACCESS_TOKEN}" \
       -H 'Content-Type: application/json' \
-      -d '{"name":"scanner-local","scope":"scanner"}' 2>/dev/null || echo '{}')
+      -d '{"name":"scanner-local","scope":"scanner"}' \
+      2>/dev/null || echo '{}')
 
-    RAW_TOKEN=$(echo "$TOKEN_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    RAW_TOKEN=$(echo "$TOKEN_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || true)
 
-    if [ -n "$RAW_TOKEN" ]; then
+    if [ -n "${RAW_TOKEN:-}" ]; then
       sedi "s|^SCANNER_TOKEN=.*|SCANNER_TOKEN=${RAW_TOKEN}|" .env
       SCANNER_TOKEN="$RAW_TOKEN"
-      export SCANNER_TOKEN
       ok "Token scanner créé et sauvegardé dans .env"
     else
       warn "Création du token échouée — utilisez l'interface admin"
     fi
   fi
+else
+  warn "Serveur non disponible — token scanner non créé"
+  info "Relancez setup.sh une fois le serveur opérationnel"
 fi
 
-# ─── Step 6 : Scanner ────────────────────────────────────────────────────────
+# ─── Étape 6 : Scanner ARP ────────────────────────────────────────────────────
 
 step "Scanner ARP/nmap"
 
 if [ -n "${SCANNER_TOKEN:-}" ]; then
-  askyn START_SCANNER "Démarrer le scanner ARP maintenant ?" "y"
-  if [ "$START_SCANNER" = "y" ]; then
+  local_scanner=""
+  askyn local_scanner "Démarrer le scanner ARP maintenant ?" "y"
+  if [ "$local_scanner" = "y" ]; then
     set -a; source .env; set +a
-    $DC --profile scanner up -d scanner
-    ok "Scanner démarré (intervalle: ${SCAN_INTERVAL:-300}s, réseaux: ${SCAN_NETWORKS:-?})"
+    if $DC --profile scanner up -d scanner; then
+      ok "Scanner démarré (réseaux: ${SCAN_NETWORKS}, intervalle: ${SCAN_INTERVAL}s)"
+    else
+      warn "Impossible de démarrer le scanner. Vérifiez : $DC logs scanner"
+    fi
   else
-    info "Pour démarrer plus tard : $DC --profile scanner up -d scanner"
+    info "Pour démarrer le scanner plus tard :"
+    info "  $DC --profile scanner up -d scanner"
   fi
 else
   warn "Token manquant — scanner non démarré"
   info "Créez un token scope 'scanner' dans l'interface admin, puis relancez setup.sh"
 fi
 
-# ─── Summary ─────────────────────────────────────────────────────────────────
+# ─── Résumé ───────────────────────────────────────────────────────────────────
+
+LOCAL_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "?")
 
 echo
 echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${CYAN}${BOLD}  ✓  NetMap est opérationnel${NC}"
 echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo
-echo -e "  ${BOLD}Interface${NC}   ${GREEN}http://localhost:${NETMAP_PORT:-8080}${NC}"
-echo -e "  ${BOLD}Login${NC}       admin / ${BOLD}${NETMAP_ADMIN_PASS}${NC}"
+echo -e "  ${BOLD}Interface locale ${NC}  ${GREEN}http://localhost:${NETMAP_PORT}${NC}"
+echo -e "  ${BOLD}Interface réseau${NC}   ${GREEN}http://${LOCAL_IP}:${NETMAP_PORT}${NC}"
+echo -e "  ${BOLD}Login${NC}              admin / ${BOLD}${NETMAP_ADMIN_PASS}${NC}"
 echo
 echo -e "  ${DIM}Logs    :${NC} $DC logs -f"
 echo -e "  ${DIM}Statut  :${NC} $DC ps"
