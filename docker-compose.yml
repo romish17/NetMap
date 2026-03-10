@@ -18,6 +18,8 @@ services:
       - NETMAP_ADMIN_PASS=${NETMAP_ADMIN_PASS:-}
     ports:
       - "127.0.0.1:3001:3000"   # Direct access for scanner (host-mode) and local tools
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux : joindre le scanner (network_mode: host)
     volumes:
       - netmap-data:/data
       # Serve the agent install script and pre-built binaries
@@ -63,6 +65,7 @@ services:
       - SCAN_NETWORKS=${SCAN_NETWORKS:-192.168.1.0/24}
       - SCAN_INTERVAL=${SCAN_INTERVAL:-300}
       - NMAP_ARGS=${NMAP_ARGS:--sV --top-ports 50 -O --osscan-limit -T4}
+      - SCANNER_TRIGGER_PORT=9080
     profiles:
       - scanner
     restart: unless-stopped

@@ -606,8 +606,9 @@ func startTriggerServer() {
 		w.Write([]byte(`{"ok":true}`))
 	})
 
-	log.Printf("HTTP trigger server listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	triggerPort := envOr("SCANNER_TRIGGER_PORT", "9080")
+	log.Printf("HTTP trigger server listening on :%s", triggerPort)
+	if err := http.ListenAndServe(":"+triggerPort, mux); err != nil {
 		log.Printf("HTTP trigger server error: %v", err)
 	}
 }

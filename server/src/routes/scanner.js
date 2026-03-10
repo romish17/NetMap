@@ -7,7 +7,8 @@ let scanInProgress = false;
 let lastScanAt     = null;   // timestamp ms
 let lastScanHosts  = 0;
 let lastScanNetwork = null;
-const SCANNER_URL  = process.env.SCANNER_URL ?? "http://scanner:8080";
+// Le scanner tourne en network_mode:host → on passe par host.docker.internal
+const SCANNER_URL  = process.env.SCANNER_URL ?? "http://host.docker.internal:9080";
 
 export default async function scannerRoutes(app) {
 
