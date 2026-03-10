@@ -371,6 +371,43 @@ func incrementIP(ip net.IP) {
 	}
 }
 
+// ─── nmap host discovery (fallback quand pcap/ARP échoue : LXC, VM, etc.) ─
+
+func nmapDiscover(network string) ([]arpResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// -sn : ping sweep uniquement (pas de scan de ports)
+	// -oX : sortie XML parseable
+	out, err := exec.CommandContext(ctx, "nmap", "-sn", "-oX", "-", network).Output()
+	if err != nil {
+		return nil, fmt.Errorf("nmap -sn %s: %w", network, err)
+	}
+
+	var run NmapRun
+	if err := xml.Unmarshal(out, &run); err != nil {
+		return nil, fmt.Errorf("nmap XML parse: %w", err)
+	}
+
+	var results []arpResult
+	for _, h := range run.Hosts {
+		var ip, mac string
+		for _, addr := range h.Addresses {
+			switch addr.AddrType {
+			case "ipv4":
+				ip = addr.Addr
+			case "mac":
+				mac = addr.Addr
+			}
+		}
+		if ip != "" {
+			results = append(results, arpResult{IP: ip, MAC: mac})
+		}
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].IP < results[j].IP })
+	return results, nil
+}
+
 // ─── nmap scan ────────────────────────────────────────────────────────────
 
 func nmapScan(ip string) ([]Port, string, string, error) {
@@ -504,10 +541,17 @@ func scanNetwork(network string) {
 	arpResults, err := arpSweep(network, "")
 	if err != nil {
 		log.Printf("[scanner] ARP sweep error: %v", err)
-		return
+		log.Printf("[scanner] Fallback: nmap ping sweep on %s (LXC/VM sans raw socket)", network)
+		arpResults, err = nmapDiscover(network)
+		if err != nil {
+			log.Printf("[scanner] nmap fallback error: %v", err)
+			return
+		}
+		log.Printf("[scanner] nmap fallback: found %d hosts on %s", len(arpResults), network)
+	} else {
+		log.Printf("[scanner] Found %d hosts via ARP on %s", len(arpResults), network)
 	}
 	total := len(arpResults)
-	log.Printf("[scanner] Found %d hosts via ARP on %s", total, network)
 
 	if total == 0 {
 		// Rien à scanner — envoyer un rapport vide pour signaler la fin
