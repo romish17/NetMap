@@ -1,0 +1,24 @@
+[Unit]
+Description=NetMap Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Server URL (required)
+Environment=NETMAP_SERVER=https://netmap.homelab.local
+# Authentication token (required - generate via admin panel)
+Environment=NETMAP_TOKEN=your-token-here
+# Push interval (default: 30s, supports: 30s, 1m, 5m)
+Environment=NETMAP_INTERVAL=30s
+# Agent ID (default: hostname)
+# Environment=NETMAP_AGENT_ID=my-custom-id
+# Docker socket path (default: /var/run/docker.sock)
+# Environment=DOCKER_SOCKET=/var/run/docker.sock
+
+ExecStart=/usr/local/bin/netmap-agent
+Restart=always
+RestartSec=15
+User=root
+
+[Install]
+WantedBy=multi-user.target

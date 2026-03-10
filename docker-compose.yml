@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+
+  # ── Backend ────────────────────────────────────────────────────────────────
+  server:
+    build: ./server
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/data/netmap.db
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - AGENT_TOKEN_SALT=${AGENT_TOKEN_SALT}
+      - PROXMOX_HOST=${PROXMOX_HOST:-}
+      - PROXMOX_USER=${PROXMOX_USER:-root@pam}
+      - PROXMOX_PASS=${PROXMOX_PASS:-}
+      - PROXMOX_POLL=${PROXMOX_POLL:-60}
+      - NODE_TLS_REJECT_UNAUTHORIZED=${PROXMOX_TLS:-0}
+      - NETMAP_ADMIN_PASS=${NETMAP_ADMIN_PASS:-}
+    volumes:
+      - netmap-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Frontend (nginx : statique + proxy /api /ws) ───────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        - VITE_API_URL=      # vide = URLs relatives → nginx proxie
+        - VITE_WS_URL=       # vide = auto-détection via window.location
+    ports:
+      - "${NETMAP_PORT:-8080}:80"
+    volumes:
+      - ./nginx-simple.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Scanner ARP/nmap ───────────────────────────────────────────────────────
+  # Requiert Linux (network_mode: host ne fonctionne pas sur Docker Desktop Mac)
+  # Démarrer avec : docker compose --profile scanner up -d
+  scanner:
+    build: ./scanner
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      - NETMAP_SERVER=http://localhost:${NETMAP_PORT:-8080}
+      - NETMAP_TOKEN=${SCANNER_TOKEN:-}
+      - SCAN_NETWORKS=${SCAN_NETWORKS:-192.168.1.0/24}
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-300}
+      - NMAP_ARGS=${NMAP_ARGS:--sV --top-ports 50 -O --osscan-limit -T4}
+    profiles:
+      - scanner
+    restart: unless-stopped
+
+volumes:
+  netmap-data:

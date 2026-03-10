@@ -1,0 +1,35 @@
+version: "3.9"
+
+# Override de développement — hot-reload, ports exposés directement
+# Usage : docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+
+  server:
+    build:
+      context: ./server
+      target: dev
+    volumes:
+      - ./server/src:/app/src   # hot-reload via node --watch
+    environment:
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+    ports:
+      - "3000:3000"             # accès direct au serveur
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    volumes:
+      - ./frontend/src:/app/src  # hot-reload Vite
+    environment:
+      - VITE_API_URL=http://localhost:3000
+      - VITE_WS_URL=ws://localhost:3000/ws
+    ports:
+      - "5173:5173"
+
+  scanner:
+    environment:
+      - NETMAP_SERVER=http://localhost:3000
+      - LOG_LEVEL=debug
